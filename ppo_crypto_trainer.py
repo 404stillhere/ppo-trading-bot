@@ -2,11 +2,14 @@
 PPO Crypto Trainer v2 — Bybit BTC/ETH/SOL/BNB
 Pattern: trading_portfolio.py (yfinance) with Bybit data.
 """
-import os, sys, time
+import os, sys, time, argparse
 from datetime import datetime, timezone
-sys.path.insert(0, "M:/temp_downloads")
-os.chdir("C:/OpenMythos")
-
+ap = argparse.ArgumentParser()
+ap.add_argument("--total_timesteps", type=int, default=200_000)
+ap.add_argument("--n_steps", type=int, default=1024)
+ap.add_argument("--batch_size", type=int, default=64)
+args = ap.parse_args()
+# Working directory is set automatically
 import numpy as np
 import pandas as pd
 import gymnasium as gym
@@ -20,7 +23,8 @@ import io, sys
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
-load_dotenv("C:/OpenMythos/.env")
+# Load .env if it exists
+load_dotenv()
 BYBIT_KEY    = os.getenv("BYBIT_API_KEY", "")
 BYBIT_SECRET = os.getenv("BYBIT_API_SECRET", "")
 
@@ -338,7 +342,7 @@ test_obs, _ = multi_env.reset()
 print(f"  test obs shape: {test_obs.shape}")
 
 # Train
-print("\n[3] Training MaskablePPO (200k steps)...")
+print(f"\n[3] Training MaskablePPO ({args.total_timesteps} steps)...")
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
 
@@ -346,8 +350,8 @@ ppo = MaskablePPO(
     MaskableActorCriticPolicy, multi_env,
     policy_kwargs=dict(net_arch=dict(pi=[128, 128, 64], vf=[128, 128, 64])),
     learning_rate=8e-5,
-    n_steps=1024,
-    batch_size=64,
+    n_steps=args.n_steps,
+    batch_size=args.batch_size,
     n_epochs=10,
     gamma=0.99,
     ent_coef=0.02,
@@ -355,9 +359,9 @@ ppo = MaskablePPO(
     seed=42,
 )
 
-ppo.learn(total_timesteps=200_000, progress_bar=True)
+ppo.learn(total_timesteps=args.total_timesteps, progress_bar=True)
 
-MODEL_OUT = "C:/OpenMythos/maskable_ppo_crypto_v2.zip"
+MODEL_OUT = "maskable_ppo_crypto_v2.zip"
 ppo.save(MODEL_OUT)
 print(f"\nModel saved: {MODEL_OUT}")
 

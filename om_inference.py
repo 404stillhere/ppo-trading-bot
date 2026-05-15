@@ -1,11 +1,11 @@
 """
 OpenMythos inference wrapper for trading decisions.
-
-Wraps M:/OpenMythos/ to make BUY/SELL/HOLD decisions from structured market data.
 """
-
-import sys
-sys.path.insert(0, 'M:/OpenMythos')
+import os, sys
+# Add OpenMythos path if it exists locally
+_openmythos_path = os.path.join(os.path.dirname(__file__), '..', 'open_mythos')
+if os.path.exists(_openmythos_path):
+    sys.path.insert(0, _openmythos_path)
 
 import re
 import traceback

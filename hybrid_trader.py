@@ -9,8 +9,6 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, "M:/temp_downloads")
-
 import numpy as np
 import torch
 from dotenv import load_dotenv
@@ -23,13 +21,13 @@ from sb3_contrib import MaskablePPO
 from gymnasium import spaces
 import gymnasium as gym
 
-load_dotenv("M:/temp_downloads/.env")
+load_dotenv()
 
 BYBIT_KEY = os.getenv("BYBIT_API_KEY", "")
 BYBIT_SECRET = os.getenv("BYBIT_API_SECRET", "")
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")
 
-MODEL_PATH = "C:/OpenMythos/maskable_ppo_crypto_v2.zip"
+MODEL_PATH = "maskable_ppo_crypto_v2.zip"
 TICKERS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
 COMMISSION = 0.0005  # Bybit spot maker ~0.1%, taker 0.1%
 STOP_LOSS_PCT = 0.03   # -3% trailing stop (FIX #5)
@@ -254,7 +252,7 @@ class HybridCryptoTrader:
             self.bybit = None
             print("[Trader] Bybit DRY-RUN mode")
 
-        self.log_file = Path("C:/OpenMythos/trades_log.csv")
+        self.log_file = Path("trades_log.csv")
 
     def _log_trade(self, ticker: str, action: str, price: float, balance: float, equity_pct: float):
         ts = datetime.now().isoformat()
