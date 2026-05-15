@@ -134,10 +134,11 @@ def compute_indicators(close, high, low):
 class CryptoTradeEnv(gym.Env):
     """
     obs = [rsi/100, bb_pos, atr_pct, vol, position] + returns_window(WINDOW)
-    action = 0 (HOLD), 1 (BUY/open or close)
+    action = 0 (HOLD), 1 (BUY), 2 (SELL/close)
+    Mask: no SELL if flat, no BUY if in position.
     """
     def __init__(self, close, high, low, rsi, bb_up, bb_lo, atr, pct_ret, vol,
-                 commission=COMMISSION, window=WINDOW):
+                 commission=COMMISSION, window=WINDOW, ticker=""):
         super().__init__()
         self.close   = close.astype(np.float32)
         self.high    = high.astype(np.float32)
@@ -155,8 +156,9 @@ class CryptoTradeEnv(gym.Env):
         self.current_step = window
         self.position = 0
         self.entry_price = 0.0
+        self.tickers  = [ticker]  # for run_agent compatibility
 
-        self.action_space = spaces.Discrete(2)
+        self.action_space = spaces.Discrete(3)
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf,
             shape=(window + 5,),
@@ -181,7 +183,8 @@ class CryptoTradeEnv(gym.Env):
         return obs
 
     def action_masks(self):
-        return np.array([True, True], dtype=bool)
+        # HOLD always allowed, BUY allowed when flat, SELL allowed when in position
+        return np.array([True, self.position == 0, self.position != 0], dtype=bool)
 
     def reset(self, seed=None, **kwargs):
         super().reset(seed=seed)
@@ -195,12 +198,14 @@ class CryptoTradeEnv(gym.Env):
         c  = self.close[i]
         reward = 0.0
 
-        if self.position != 0:
+        # Action 2 = SELL/close when in position
+        if action == 2 and self.position != 0:
             reward = (c - self.entry_price) / (self.entry_price + 1e-10) - self.commission
             self.position    = 0
             self.entry_price = 0.0
 
-        if action == 1:
+        # Action 1 = BUY when flat
+        if action == 1 and self.position == 0:
             self.position    = 1
             self.entry_price = c
 
@@ -210,7 +215,9 @@ class CryptoTradeEnv(gym.Env):
 
 
 class MultiInputEnv(gym.Env):
-    """Randomly picks ticker each step — SB3-compatible standalone env."""
+    """Randomly picks ticker each step — SB3-compatible standalone env.
+    Supports 3 actions: 0=HOLD, 1=BUY, 2=SELL.
+    """
     def __init__(self, envs):
         super().__init__()
         self.envs = envs
@@ -250,40 +257,27 @@ class MultiInputEnv(gym.Env):
 # ─── VALIDATION ──────────────────────────────────────────────────────────────
 
 def run_agent(model, env):
+    """Validate agent on a single-ticker env. Reward is accumulated directly."""
     obs, _ = env.reset()
     done   = False
     cum    = 0.0
-    curr_pos, curr_entry, curr_ticker = 0, 0.0, ""
     trades = []
 
     while not done:
         mask = env.action_masks()
         act, _ = model.predict(obs, action_masks=mask, deterministic=True)
-        prev_pos = curr_pos
-        prev_ticker = curr_ticker
+        prev_pos = env.position
 
-        # FIX #4: capture ticker/price BEFORE step() changes state
-        active_idx = env._active if hasattr(env, "_active") else 0
-        curr_ticker = env.tickers[active_idx] if hasattr(env, "tickers") else ""
-        curr_price  = env.close[env.current_step - 1] if hasattr(env, "close") else 0.0
+        obs, reward, done, _, _ = env.step(int(act))
 
-        obs, _, done, _, _ = env.step(int(act))
-
-        if env.position != prev_pos:
-            if prev_pos == 1 and prev_ticker == curr_ticker:
-                # FIX #4: verify ticker matches before recording PnL
-                pnl = (curr_price - curr_entry) / (curr_entry + 1e-10) * 100
-                cum += pnl
-                trades.append({"pnl": pnl / 100})
-            if env.position == 1:
-                # FIX #4: save ticker alongside entry
-                curr_pos, curr_entry = 1, curr_price
-            else:
-                curr_pos, curr_entry = 0, 0.0
+        # Count a trade when position closes (either BUY→flat via SELL, or flat→BUY)
+        if prev_pos == 1 and env.position == 0:
+            cum += reward
+            trades.append({"pnl": reward})
 
     pnls = [t["pnl"] for t in trades]
     win  = sum(1 for p in pnls if p > 0) / max(len(pnls), 1) * 100 if pnls else 0
-    return {"return": round(cum, 2), "n_trades": len(trades), "win_rate": round(win, 1)}
+    return {"return": round(cum * 100, 2), "n_trades": len(trades), "win_rate": round(win, 1)}
 
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
@@ -324,12 +318,12 @@ for ticker, df in all_data.items():
         close[train_idx], high[train_idx], low[train_idx],
         rsi[train_idx], bb_up[train_idx], bb_lo[train_idx],
         atr[train_idx], rets[train_idx], vol[train_idx],
-        commission=COMMISSION, window=WINDOW)
+        commission=COMMISSION, window=WINDOW, ticker=ticker)
     env_val = CryptoTradeEnv(
         close[val_idx], high[val_idx], low[val_idx],
         rsi[val_idx], bb_up[val_idx], bb_lo[val_idx],
         atr[val_idx], rets[val_idx], vol[val_idx],
-        commission=COMMISSION, window=WINDOW)
+        commission=COMMISSION, window=WINDOW, ticker=ticker)
 
     train_envs.append(env_tr)
     val_envs[ticker]  = env_val
@@ -362,7 +356,7 @@ ppo = MaskablePPO(
 
 ppo.learn(total_timesteps=args.total_timesteps)
 
-MODEL_OUT = "maskable_ppo_crypto_v2.zip"
+MODEL_OUT = "maskable_ppo_crypto_v3.zip"
 ppo.save(MODEL_OUT)
 print(f"\nModel saved: {MODEL_OUT}")
 
