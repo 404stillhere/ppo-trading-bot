@@ -27,6 +27,15 @@ BYBIT_KEY = os.getenv("BYBIT_API_KEY", "")
 BYBIT_SECRET = os.getenv("BYBIT_API_SECRET", "")
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")
 
+# Telegram
+try:
+    import telegram
+    TELEGRAM_AVAILABLE = True
+except ImportError:
+    TELEGRAM_AVAILABLE = False
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8508455131:AAEpLaj1E7R6D9-cdqe4Szm7VL3K2qPmCqE")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID",   "490050322")
+
 MODEL_PATH = "maskable_ppo_crypto_v3.zip"
 TICKERS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
 COMMISSION = 0.0005  # Bybit spot maker ~0.1%, taker 0.1%
@@ -257,11 +266,31 @@ class HybridCryptoTrader:
 
         self.log_file = Path("trades_log.csv")
 
+        # Telegram
+        self.tg = None
+        if TELEGRAM_AVAILABLE and TELEGRAM_BOT_TOKEN:
+            try:
+                self.tg = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
+                self.tg_chat_id = TELEGRAM_CHAT_ID
+                print(f"[Telegram] Bot connected — chat_id={TELEGRAM_CHAT_ID}")
+            except Exception as e:
+                print(f"[Telegram] Bot init failed: {e}")
+        else:
+            print("[Telegram] Bot not available (python-telegram-bot not installed or no token)")
+
     def _log_trade(self, ticker: str, action: str, price: float, balance: float, equity_pct: float):
         ts = datetime.now().isoformat()
         row = f"{ts},{ticker},{action},{price:.4f},{balance:.2f},{equity_pct:.4f}\n"
         with open(self.log_file, "a") as f:
             f.write(row)
+
+    def _notify(self, msg: str):
+        if self.tg:
+            try:
+                self.tg.send_message(text=msg, chat_id=int(self.tg_chat_id))
+            except Exception:
+                pass
+        print(f"  [TG] {msg}")
 
     def _run_ticker(self, ticker: str, df, equity_start: float) -> dict:
         """Run PPO inference on a single ticker and execute."""
@@ -321,11 +350,15 @@ class HybridCryptoTrader:
                 qty = max(qty, balance * 0.02 / price)
                 order_id = self.bybit.buy_market(ticker, qty)
                 if order_id:
+                    msg = f"🟢 BUY\n{ticker} {qty:.4f} @ {price:.2f}"
+                    self._notify(msg)
                     print(f"  {ticker:8s} BUY  {qty:.6f} @ {price:.2f} — order {order_id}")
             elif action_idx == 2 and position > 0:
                 # SELL — close long position
                 qty = position
                 self.bybit.sell_market(ticker, qty)
+                msg = f"🔴 SELL\n{ticker} {qty:.4f} @ {price:.2f}"
+                self._notify(msg)
                 print(f"  {ticker:8s} SELL {qty:.6f} @ {price:.2f}")
         except Exception as e:
             print(f"  [!] Execution error {ticker}: {e}")
@@ -369,27 +402,39 @@ class HybridCryptoTrader:
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dry-run", dest="dry_run", action="store_false")
+    parser.add_argument("--live",    dest="dry_run", action="store_true")
+    parser.add_argument("--once",    action="store_true", help="single cycle then exit")
+    args = parser.parse_args()
+    DRY_RUN = args.dry_run if 'dry_run' in args else DRY_RUN
+
     print(f"DRY_RUN={DRY_RUN}")
     print(f"Bybit key set: {bool(BYBIT_KEY)}")
 
     trader = HybridCryptoTrader(dry_run=DRY_RUN)
 
-    if len(sys.argv) > 1 and sys.argv[1] == "--once":
-        # Single cycle
+    if args.once:
         results = trader.run_cycle()
         for r in results:
             print(f"  {r['ticker']}: {r['action']} @ {r['price']:.2f}")
     else:
-        # Continuous loop
         print("Starting trading loop (Ctrl+C to stop)...")
+        first = True
         while True:
             try:
-                trader.run_cycle()
+                results = trader.run_cycle()
+                if first:
+                    trader._notify(f"🚀 PPO Trader started\nDRY_RUN={'yes' if DRY_RUN else 'LIVE'}\nSymbols: {', '.join(trader.tickers)}")
+                    first = False
                 print("Sleeping 60 minutes until next cycle...")
                 time.sleep(3600)
             except KeyboardInterrupt:
+                trader._notify("🛑 PPO Trader stopped")
                 print("\nStopped.")
                 break
             except Exception as e:
+                trader._notify(f"⚠️ Cycle error: {e}")
                 print(f"[!] Cycle error: {e}")
                 time.sleep(300)
