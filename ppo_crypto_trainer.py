@@ -115,7 +115,8 @@ def compute_indicators(close, high, low):
     tr = np.zeros(n-1, dtype=np.float32)
     for i in range(1, n):
         tr[i-1] = max(high[i], close[i-1]) - min(low[i], close[i-1])
-    atr = np.convolve(tr, np.ones(14)/14, mode="same").astype(np.float32)
+    atr_sma = np.convolve(tr, np.ones(14)/14, mode="same")
+    atr = np.concatenate([[atr_sma[0]], atr_sma]).astype(np.float32)  # pad to length n
 
     # Returns
     pct_ret = np.concatenate([[0], np.diff(close) / (close[:-1] + 1e-10)]).astype(np.float32)
