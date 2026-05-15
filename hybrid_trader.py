@@ -30,6 +30,7 @@ DRY_RUN = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")
 # Telegram
 try:
     import telegram
+    import asyncio
     TELEGRAM_AVAILABLE = True
 except ImportError:
     TELEGRAM_AVAILABLE = False
@@ -287,7 +288,7 @@ class HybridCryptoTrader:
     def _notify(self, msg: str):
         if self.tg:
             try:
-                self.tg.send_message(text=msg, chat_id=int(self.tg_chat_id))
+                asyncio.run(self.tg.send_message(text=msg, chat_id=int(self.tg_chat_id)))
             except Exception:
                 pass
         print(f"  [TG] {msg}")
