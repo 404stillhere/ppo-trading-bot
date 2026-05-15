@@ -27,7 +27,7 @@ BYBIT_KEY = os.getenv("BYBIT_API_KEY", "")
 BYBIT_SECRET = os.getenv("BYBIT_API_SECRET", "")
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")
 
-MODEL_PATH = "maskable_ppo_crypto_v2.zip"
+MODEL_PATH = "maskable_ppo_crypto_v3.zip"
 TICKERS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
 COMMISSION = 0.0005  # Bybit spot maker ~0.1%, taker 0.1%
 STOP_LOSS_PCT = 0.03   # -3% trailing stop (FIX #5)
@@ -142,7 +142,7 @@ class CryptoEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(5 + window,), dtype=np.float32
         )
-        self.action_space = spaces.Discrete(2)  # 0=HOLD, 1=BUY/close
+        self.action_space = spaces.Discrete(3)  # 0=HOLD, 1=BUY, 2=SELL
 
     def _get_obs(self) -> np.ndarray:
         i = min(self.current_step, self.n - 1)
@@ -168,57 +168,60 @@ class CryptoEnv(gym.Env):
         i = min(self.current_step, self.n - 1)
         c = self.close[i]
         reward = 0.0
+        reason = ""
 
-        # FIX #1: check action BEFORE touching position
-        # FIX #5: SL/TP checked after every action on open position
-        if action == 0:
-            # HOLD — only close via SL/TP if a position is open
+        # Action 2 = SELL / close position
+        if action == 2:
             if self.position != 0:
                 pnl_pct = (c - self.entry_price) / (self.entry_price + 1e-10)
-                # Stop-loss: -3%, take-profit: +6%
-                if pnl_pct <= -STOP_LOSS_PCT:
-                    reward = pnl_pct - self.commission
-                    self.position = 0
-                    self.entry_price = 0.0
-                    self._log_reason = "SL"
-                elif pnl_pct >= TAKE_PROFIT_PCT:
-                    reward = pnl_pct - self.commission
-                    self.position = 0
-                    self.entry_price = 0.0
-                    self._log_reason = "TP"
-                # else: keep position, no reward this step
+                reward = pnl_pct - self.commission
+                self.position = 0
+                self.entry_price = 0.0
+                reason = "SELL"
+
+        # Action 1 = BUY / open long (only when flat)
         elif action == 1:
             if self.position == 0:
-                # Open long
                 self.position = 1
                 self.entry_price = c
             else:
-                # Close — check SL/TP first for live mode safety
                 pnl_pct = (c - self.entry_price) / (self.entry_price + 1e-10)
                 if pnl_pct <= -STOP_LOSS_PCT:
                     reward = pnl_pct - self.commission
-                    self._log_reason = "SL"
+                    self.position = 0
+                    self.entry_price = 0.0
+                    reason = "SL"
                 elif pnl_pct >= TAKE_PROFIT_PCT:
                     reward = pnl_pct - self.commission
-                    self._log_reason = "TP"
-                else:
+                    self.position = 0
+                    self.entry_price = 0.0
+                    reason = "TP"
+
+        # Action 0 = HOLD — SL/TP protection if in position
+        else:
+            if self.position != 0:
+                pnl_pct = (c - self.entry_price) / (self.entry_price + 1e-10)
+                if pnl_pct <= -STOP_LOSS_PCT:
                     reward = pnl_pct - self.commission
-                self.position = 0
-                self.entry_price = 0.0
+                    self.position = 0
+                    self.entry_price = 0.0
+                    reason = "SL"
+                elif pnl_pct >= TAKE_PROFIT_PCT:
+                    reward = pnl_pct - self.commission
+                    self.position = 0
+                    self.entry_price = 0.0
+                    reason = "TP"
 
         self.current_step += 1
         done = self.current_step >= self.max_step
-        truncated = False
         obs = self._get_obs()
-        reason = getattr(self, "_log_reason", "")
-        if self.position == 0 and reason:
-            delattr(self, "_log_reason")
         info = {"price": float(c), "position": self.position,
                 "rsi": None, "bb_pos": None, "reason": reason}
-        return obs, reward, done, truncated, info
+        return obs, reward, done, False, info
 
     def action_masks(self) -> np.ndarray:
-        return np.array([True, True], dtype=bool)
+        # 0=HOLD always, 1=BUY when flat, 2=SELL when in position
+        return np.array([True, self.position == 0, self.position != 0], dtype=bool)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -278,7 +281,7 @@ class HybridCryptoTrader:
         balance = self.bybit.get_balance() if self.bybit else 0.0
         position = self.bybit.get_position(ticker) if self.bybit else 0.0
 
-        action_map = {0: "HOLD", 1: "BUY/CLOSE"}
+        action_map = {0: "HOLD", 1: "BUY", 2: "SELL"}
         action_str = action_map.get(int(action_idx), "HOLD")
 
         rsi, bb_pos, atr_pct = compute_indicators(env.close)
@@ -305,31 +308,25 @@ class HybridCryptoTrader:
 
         # Live execution
         try:
-            if action_idx == 1:
+            if action_idx == 1 and position <= 0:
                 # BUY — close short first if any, then buy
                 if position < 0:
                     qty = abs(position)
                     self.bybit.buy_market(ticker, qty)
                     time.sleep(0.5)
-                # ATR-based position sizing (FIX #6)
-                # 1% risk per trade; stop = ATR, so qty = risk / ATR_dollar
                 atr_pct = atr_pct  # from compute_indicators above
                 risk_amount = balance * 0.01
                 atr_dollar = price * (atr_pct / 100)
                 qty = risk_amount / atr_dollar if atr_dollar > 0 else balance * 0.25 / price
-                qty = max(qty, balance * 0.02 / price)  # cap at 2% min
+                qty = max(qty, balance * 0.02 / price)
                 order_id = self.bybit.buy_market(ticker, qty)
                 if order_id:
                     print(f"  {ticker:8s} BUY  {qty:.6f} @ {price:.2f} — order {order_id}")
-            elif action_idx == 0 and position > 0:
-                # HOLD — check SL/TP (FIX #5)
-                entry = self.bybit.get_entry_price(ticker) if hasattr(self.bybit, "get_entry_price") else price * 0.97
-                pnl_pct = (price - entry) / (entry + 1e-10)
-                if pnl_pct <= -STOP_LOSS_PCT or pnl_pct >= TAKE_PROFIT_PCT:
-                    qty = position
-                    self.bybit.sell_market(ticker, qty)
-                    reason = "SL" if pnl_pct < 0 else "TP"
-                    print(f"  {ticker:8s} {reason}  {qty:.6f} @ {price:.2f}")
+            elif action_idx == 2 and position > 0:
+                # SELL — close long position
+                qty = position
+                self.bybit.sell_market(ticker, qty)
+                print(f"  {ticker:8s} SELL {qty:.6f} @ {price:.2f}")
         except Exception as e:
             print(f"  [!] Execution error {ticker}: {e}")
 
