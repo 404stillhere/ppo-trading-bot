@@ -360,7 +360,7 @@ ppo = MaskablePPO(
     seed=42,
 )
 
-ppo.learn(total_timesteps=args.total_timesteps, progress_bar=True)
+ppo.learn(total_timesteps=args.total_timesteps)
 
 MODEL_OUT = "maskable_ppo_crypto_v2.zip"
 ppo.save(MODEL_OUT)
